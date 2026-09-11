@@ -1,0 +1,121 @@
+{
+  "realm": "versa-telecom",
+  "enabled": true,
+  "displayName": "Versa Telecom CPE Manager",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "verifyEmail": false,
+  "resetPasswordAllowed": false,
+  "sslRequired": "external",
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "offlineSessionIdleTimeout": 2592000,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Full system access - manages CPE inventory, rotations, audit and application configuration"
+      },
+      {
+        "name": "security_operator",
+        "description": "Can view CPEs, initiate credential rotations and view audit events"
+      },
+      {
+        "name": "field_engineer",
+        "description": "Can view authorised CPEs and request credential access"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "versa-admins",
+      "path": "/versa-admins"
+    },
+    {
+      "name": "security-operators",
+      "path": "/security-operators"
+    },
+    {
+      "name": "field-engineers",
+      "path": "/field-engineers"
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "versa-cpe-manager",
+      "name": "Versa CPE Manager SPA",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "https://localhost/*",
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "https://localhost",
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@versa-dev.local",
+      "firstName": "Versa",
+      "lastName": "Administrator",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Admin12345!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "ops",
+      "enabled": true,
+      "email": "ops@versa-dev.local",
+      "firstName": "Security",
+      "lastName": "Operator",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Ops12345!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["security_operator"]
+    },
+    {
+      "username": "field",
+      "enabled": true,
+      "email": "field@versa-dev.local",
+      "firstName": "Field",
+      "lastName": "Engineer",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Field12345!",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["field_engineer"]
+    }
+  ],
+  "userFederationProviders": []
+}

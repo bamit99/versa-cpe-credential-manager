@@ -1,0 +1,29 @@
+{
+  "_comment": "Reference fragment for Active Directory LDAP federation. This is NOT auto-imported. When AD details are available, register the provider in the Keycloak Admin Console: Realm Settings -> User Federation -> Add LDAP provider, then apply these values. Edit Mode READ_ONLY keeps AD authoritative; Keycloak never imports passwords.",
+  "providerName": "ldap",
+  "config": {
+    "enabled": ["true"],
+    "vendor": ["ad"],
+    "connectionUrl": ["${AD_CONNECTION_URL}"],
+    "bindDn": ["${AD_SERVICE_ACCOUNT_DN}"],
+    "bindCredential": ["${AD_SERVICE_ACCOUNT_PASSWORD}"],
+    "useTruststoreSpi": ["ldapsOnly"],
+    "connectionPooling": ["true"],
+    "connectionTimeout": ["5000"],
+
+    "editMode": ["READ_ONLY"],
+    "importEnabled": ["true"],
+    "syncRegistrations": ["false"],
+    "usersDn": ["${AD_USERS_DN}"],
+    "usernameLDAPAttribute": ["sAMAccountName"],
+    "rdnLDAPAttribute": ["cn"],
+    "uuidLDAPAttribute": ["objectGUID"],
+    "userObjectClasses": ["person, organizationalPerson, user"],
+    "searchScope": ["2"],
+    "pagination": ["true"],
+    "batchSizeForSync": ["1000"],
+
+    "fullSyncPeriod": ["86400"],
+    "changedSyncPeriod": ["3600"]
+  }
+}

@@ -1,0 +1,43 @@
+# Secrets
+.env
+*.env.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.npm/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+*.log
+postgres_data/
+redis_data/
+
+# Certificates (self-signed, regenerated)
+nginx/certs/*.crt
+nginx/certs/*.key
+
+# Backups
+backups/
+
+# Test artifacts
+htmlcov/
+.coverage

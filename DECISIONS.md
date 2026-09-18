@@ -162,3 +162,423 @@ Action vocabulary follows the requirement document (e.g. `CREDENTIAL_VIEW_REQUES
 - Real AD OU values for LDAP federation (developer to supply during LDAP integration).
 - CyberArk backend, scheduled rotation, SSO beyond Keycloak, SIEM, HA/multi-region, PWA,
   approval workflows — all out of MVP scope (see requirements sections 17 & 18).
+
+---
+
+## 7. Phase 2A — Credential Reveal Hardening (implemented)
+
+### 7.1 DB-backed password policy
+
+- Added an `app_settings` key/value table (model `AppSetting`, migration `0002_app_settings`).
+- The credential-generation policy is now a runtime setting (`SettingsService`) persisted in
+  that table, not a hardcoded `PasswordPolicy()`. `GET/PUT /api/v1/admin/password-policy`
+  now actually read/write it; impossible combinations (sum of minimums > length) are rejected
+  with 400.
+- `CredentialService` / `RotationService` fall back to the persisted policy when none is passed
+  in, so fresh installs use the documented default (24 chars) until an admin overrides it.
+
+### 7.2 Persistent access-request trail
+
+- The `access_requests` table (schema existed since Phase 1) is now populated on every
+  governed reveal: `granted` rows carry the reason, ticket, correlation ID, grant time and an
+  expiry tied to the display-timeout setting; `denied` rows record the refusal. Only requests
+  carrying a reason/ticket are recorded — a plain admin/operator reveal without one is audited
+  only (not a "request").
+- Identity mirroring was extracted from `/me` into a reusable `upsert_user` helper
+  (`services/user_service.py`) so reveals can resolve the FK without requiring a prior `/me`.
+
+### 7.3 Truthful "Needs Rotation" dashboard metric
+
+Previously the tile returned `count(*)` of credentials (always ≈ total CPEs). It now counts
+only **ACTIVE** credentials that are rotation failed, past their `next_rotation_at`, or whose
+last rotation is older than `rotation_due_days` (default 90, env-configurable). RETIRED
+history rows are excluded.
+
+### 7.4 Rotation lifecycle fixes (kept minimal — full engine is Phase 2B)
+
+- Rotation can now be retried after `ROTATION_FAILED` (previously the 409 gate blocked retries
+  forever) and after a completed rotation (`OLD_SECRET_RETIRED`). Only genuinely in-flight
+  states block a new request.
+- Successful rotation snapshots the previous row as an immutable `RETIRED` version with
+  `retired_at` set, so the admin credential-history endpoint shows full version history.
+- These added 22 tests (43 total, all green).
+
+---
+
+## 8. Phase 2B — Rotation Engine + Rotation UI (implemented)
+
+### 8.1 Bounded-concurrency bulk rotation
+
+`POST /api/v1/bulk/rotate` performs rotations in a `ThreadPoolExecutor` with
+`MAX_CONCURRENT_ROTATIONS = 5` and `MAX_BULK_CPES = 100`:
+
+- Input is an arbitrary JSON array of `cpe_id` strings; results are returned per CPE as
+  `{cpe_id, ok, version | error}` so a single mixed batch can report partial success instead of
+  failing wholesale. Duplicates in the payload are deduplicated and a payload over the cap is
+  rejected with 400.
+- Each worker thread gets its **own** DB session via an injectable `get_session_factory`
+  dependency (new in `db/session.py`), so concurrent workers don't share a connection. Shared
+  dependencies (`get_versa_client_factory`, `get_secret_store_factory`) are also injectable,
+  which lets tests drive the endpoint with a recording client + shared mock vault.
+- Concurrency is capped per-batch because the real Versa client is blocking/non-async; scaling
+  past 5 needs investigation of Director-side limits (a documented follow-up, not mooted).
+
+### 8.2 New-secret references are now UUIDs
+
+Previously the new reference was predictable (`cred:rot:{version+1}`); under concurrent bulk
+rotation two same-version CPEs collided, which surfaced a latent bug: `CredentialService.new_reference`
+was called as a class method but wasn't a staticmethod. Both fixed — it is now a `@staticmethod`
+returning `cred:<hex>` without collision handling.
+
+### 8.3 Rotation schedule tracking
+
+- New `rotation_interval_days` config (default 90, env-configurable) drives `next_rotation_at`,
+  computed at credential creation (`activated_at + interval`) and advanced on every successful
+  rotation (`last_rotated_at + interval`).
+- Admin credential metadata now returns `rotation_state` and `next_rotation_at`.
+
+### 8.4 Needs-rotation filter + rotation UI
+
+- `GET /api/v1/cpes?needs_rotation=true` returns only CPEs whose ACTIVE credential is rotation
+  failed, past `next_rotation_at`, or stale vs `rotation_due_days` — the same predicate the
+  dashboard metric uses.
+- New `/rotation` page (admin/security_operator): selectable list of due CPEs, "Rotate selected"
+  posting to `/bulk/rotate` with a success/failure summary, and a recent rotation-activity table
+  fed from the audit log. CPE detail now shows a failure/in-progress banner and the next-rotation
+  date (marked "due"). Nav menu gained a "Rotation" item.
+
+### 8.5 A note on exception semantics
+
+The pre-existing rotation code tended to leak the misleading `SecretNotFoundError` (mock vault
+raises it for "reference already exists"). UUID references remove the collision path altogether,
+so the special-cased collision handling was deleted rather than re-semanticized.
+
+- 8 new API-level tests (51 total, all green): bounded-concurrency parallelism (workers seen
+  concurrently, never above the cap), batch success/v2, dedupe, >100 cap → 400, empty-batch
+  noop, `next_rotation_at` set on create and advanced on rotation, and `needs_rotation` filtering.
+
+---
+
+## 9. Phase 2C — Admin Surfaces & Identity Sync (implemented)
+
+### 9.1 Runtime password-policy surface (2C-1)
+
+- `GET/PUT /api/v1/admin/password-policy` now emits a `PASSWORD_POLICY_UPDATED` audit event
+  carrying `previous`/`current` policy dicts **only when the value actually changes** — a no-op
+  PUT stays silent, and an impossible combination still 400s without an audit row.
+- New `/admin/settings` page (admin-only, role-gated via `ProtectedRoute roles`) edits the policy
+  with inline validation that mirrors the backend rule (sum of minimums ≤ length) and an alert
+  explaining the policy applies to new/rotated credentials only.
+
+### 9.2 Role-gating routes frontend-side
+
+`ProtectedRoute` gained an optional `roles` prop; `/rotation`, `/audit`, and all `/admin/*`
+routes enforce role requirements client-side. Backend `require_admin`/`require_security_operator`
+remain the authority — the frontend gate is UX only.
+
+### 9.3 Directors + reachability probe (2C-2)
+
+- Directors became fully manageable via API: `PUT /admin/directors/{id}` (toggle `enabled`,
+  bump `versa_version`, edit endpoint/secret ref) joins the existing create/delete; `DirectorOut`
+  now exposes `capabilities` parsed from the stored capability-flags JSON, with non-`dict`/bad
+  JSON falling back to `{}`.
+- `GET /admin/directors/{id}/status` performs a bounded **TCP** reachability probe (3 s timeout)
+  derived from `api_base_url`, returning `{reachable, detail, latency_ms}`. Deliberate choice:
+  a raw TCP probe makes no protocol assumptions and does not authenticate, so it can’t be abused;
+  full REST/regtoken liveness is a later lab-validated follow-up.
+- New `/admin/directors` page: table with version/capabilities tags, enabled switch, per-row
+  probe button + result tag, delete, and an Add-Director modal.
+
+### 9.4 CPE assignments (2C-2)
+
+- `AssignmentService` gained `unassign` (audits `CPE_UNASSIGNED`) and `list()` (joins the user
+  mirror + CPE details). API: `GET /admin/assignments` (optional `user_subject` filter),
+  `DELETE /admin/assignments`.
+- New `/admin/assignments` page: pick a field engineer (from the user mirror), browse/search
+  CPEs, toggle assign/unassign per device.
+
+### 9.5 Keycloak identity sync (2C-3)
+
+- New `IdentitySyncService` (services/identity_sync_service.py) mirrors realm users into the
+  local `users` table using the Keycloak **Admin REST API**:
+  - Service-account token via client-credentials at `/realms/{realm}/protocol/openid-connect/token`
+    then paged `GET /admin/realms/{realm}/users`.
+  - Roles are taken from each user's `realmRoles` when the list response carries them, otherwise
+    fetched per-user from `role-mappings/realm`; only the interpreted set
+    (`admin`, `security_operator`, `field_engineer`) is persisted.
+  - `enabled` is mirrored, so Keycloak-disabled users show as disabled locally (and the users
+    listing exposes it for assignment cleanup).
+- Config: `keycloak_admin_url` (empty → falls back to `keycloak_url`), `keycloak_admin_client_id`
+  (default `admin-cli`), `keycloak_admin_client_secret`. The service account must hold
+  realm-management roles (query-users, view-users).
+- `POST /admin/sync/users` triggers a sync and returns `{created, updated, total}`; failures to
+  reach or authenticate against the admin API surface as 502 with a clear message, and HTTP
+  transport is unit-tested with `httpx.MockTransport` (token exchange, paging, role mappings,
+  enable/disable, token failure).
+- New `/admin/users` page: mirrored users with roles/enabled/last-login and a "Sync from
+  Keycloak" action showing result or error alert.
+
+- Phase 2C added 13 tests (64 total, all green) across policy audit, directors, assignments,
+  users listing, and identity-sync HTTP semantics.
+
+---
+
+## 10. Phase 2D — Director connection & inventory sync
+
+### 10.1 Transport choice: Versa Director REST API (not SSH)
+
+Discovery of existing CPE inventory and (future) password changes go through the
+Director **REST API**, not SSH/CLI scraping:
+
+- Structured, versioned responses; one API surface for discovery and credential
+  operations (change-password / setLocalUserPassword share the same auth + transport).
+- SSH scraping is brittle to CLI/version drift and impractical at ~3,000+ CPEs.
+- SSH remains a possible **per-CPE fallback** only if a specific model lacks API support.
+
+Facts used (see `docs/versa-version-matrix.md`): `GET /vnms/sdwan/vnf/cpes`,
+`GET /vnms/organization/orgs`; token via `POST /auth/token` (password grant with
+`client_id`/`client_secret`); Director 22.1.3 and 22.1.4 share the pre-23.1.1 protocol.
+
+### 10.2 Real client (`VersaDirectorPre23Client`)
+
+- `app/adapters/versa/director22.py`: OAuth password grant → Bearer token, then
+  `discover_devices()` maps API records defensively (`_map_device`) into the internal
+  `DeviceRecord`. Transport is injectable (`httpx.MockTransport` in tests).
+- Credential mutations (`update_credential`, `verify_credential`, `get_device_status`)
+  intentionally raise `NotImplementedError` until lab validation; the sync endpoint
+  translates that to HTTP 400. Endpoint field names are validated against the version
+  matrix, not guessed.
+- `build_versa_client(director, settings, secret_store=None)` returns the mock when
+  `secret_store_type == "mock_vault"` or no director is configured; otherwise the real
+  pre-23 client.
+
+### 10.3 Discovery → inventory
+
+- `POST /api/v1/admin/directors/{id}/sync-cpes` → `SyncCpesResult{discovered, created,
+  updated}`. Reuses the rotation factories (`get_secret_store_factory`,
+  `get_versa_client_factory`) so dev keeps using the mock client.
+- `CPEService.upsert_cpes(rows, user)` is shared by CSV import and discovery (upsert by
+  `cpe_id`), so a second pull yields `created=0, updated=N`.
+- Each sync writes a `CPE_DISCOVERED` audit event carrying counts/metadata.
+- New `GET /cpes?director_id=` filter supports per-Director counts in the UI.
+- Admin UI: Directors page gains a **Pull CPEs** action with a success alert and a
+  per-Director CPE count column.
+
+### 10.4 Config
+
+- `versa_api_username` / `versa_api_password` (env-only) hold the Director console
+  account for the password grant. Per-Director client credentials still resolve via the
+  SecretStore (`oauth_secret_ref`); the final per-Director credential model is a
+  lab-verification item.
+
+### 10.5 Stack bring-up fixes found during first end-to-end boot
+
+Running the full stack for the first time surfaced several latent issues (all fixed):
+
+- **Postgres init script** (`init-scripts/01-create-databases.sql`): psql does **not**
+  interpolate `:'VAR'` inside `$$` dollar-quoted blocks, so app/Keycloak roles were never
+  created. Replaced with `init-scripts/01-create-databases.sh` (bash heredoc; entrypoint
+  runs it) using `$VAR`.
+- **nginx ↔ networks**: nginx proxies `/auth` to Keycloak but was only on `frontend-net`,
+  so `keycloak` did not resolve. nginx now joins `backend-net` as well.
+- **nginx `proxy_pass` path bugs**: `/api/` used a trailing slash (stripped `/api`,
+  breaking every API call) → removed; Keycloak upstream omitted the port (`:8080`) → added.
+- **Dotfile rule**: `location ~ /\.` blocked Keycloak's required `/.well-known/…`. Now
+  `~ /\.(?!well-known/)`.
+- **Keycloak 26 hostname (v2)**: `KC_HTTP_RELATIVE_PATH=/auth` + a full-URL
+  `KC_HOSTNAME=https://localhost:${NGINX_HTTPS_PORT:-443}/auth` so the issuer/redirect URIs
+  match the browser origin; `KC_HOSTNAME_STRICT=false` for dev.
+- **Token audience**: backend validates `aud=account` (Keycloak default). The public SPA
+  client received no `aud`. Added `oidc-audience-mapper` client mappers for
+  `versa-cpe-manager` and `account`; the client also enables direct access grants for
+  scripted/dev checks. Realm JSON is the source of truth (import needs a fresh DB, i.e.
+  `docker compose down -v`).
+- **Backend token validation** (`config.py`): split the public **issuer**
+  (`keycloak_public_url`, e.g. `https://localhost:8443/auth`) from the internal **JWKS**
+  fetch (`keycloak_url`, e.g. `http://keycloak:8080/auth`), so proxied tokens validate.
+- **Rootless Docker**: cannot publish ports < 1024. `docker-compose.yml` now parameterizes
+  nginx host ports (`NGINX_HTTP_PORT`/`NGINX_HTTPS_PORT`, default 80/443) and derives the
+  frontend `VITE_*` URLs from the HTTPS port; local `.env` sets 8080/8443.
+- **`realm-config/ldap-federation.json`** renamed to `.example`: it is a reference
+  fragment, but Keycloak tried to import it as a realm and rejected the `_comment` field.
+- **Frontend Vite env vars**: `VITE_*` are inlined at **build** time, but they were set
+  under compose `environment:` (runtime only), so the SPA silently fell back to
+  `https://localhost/auth` (port 443) → login redirect "Unable to contact the identity
+  provider". Moved to `build.args` and declared `ARG`/`ENV` in `frontend/Dockerfile`
+  before `npm run build`.
+
+### 10.6 Verification
+
+- Backend: 71 tests green (Phase 2D added 7: client mapping/token/NotImplementedError plus
+  sync-cpes create/upsert/404 + director filter).
+- Frontend: `tsc --noEmit` and `vite build` clean.
+- Live stack: SPA `200`; OIDC discovery issuer `https://localhost:8443/auth/realms/versa-telecom`;
+  password grant succeeds; `GET /api/v1/me` → 200 as `admin`; seeded inventory 6 →
+  `POST /admin/directors/1/sync-cpes` → `{discovered:5, created:5, updated:0}` → total 11;
+  second pull → `{0,5}`; unknown Director → 404.
+
+---
+
+## 11. Admin → Integrations (read-only status)
+
+Answers the first-run question: "how does an admin see what's wired before LDAP/AD
+exists?" The tool is fully usable *before* directory federation, because Keycloak keeps
+its own local user store and LDAP is additive.
+
+### 11.1 Design
+
+- `GET /api/v1/admin/integrations` (admin-only) returns an aggregate status:
+  `keycloak`, `ldap`, `secret_store`, `director_creds`, `break_glass`.
+- **Read-only by decision.** LDAP/AD federation is *observed*, never mutated, from the app:
+  registration stays in the Keycloak Admin Console (deep-linked from the page). This avoids
+  granting the app broad `manage-realm`/`manage-components` rights.
+- `IntegrationStatusService` (`services/integration_service.py`) probes Keycloak discovery
+  and reads user-federation components via the Admin REST API, reusing the
+  client-credentials pattern from `IdentitySyncService`. Transport is injectable
+  (`httpx.MockTransport`) for tests.
+- **Graceful degradation:** any probe failure yields `available/reachable=False` plus a
+  human-readable `detail` instead of a 5xx, so the page always renders.
+- Frontend: new `Admin → Integrations` page (cards + status tags + "Open Keycloak Admin
+  Console" link); routed behind the `admin` role.
+
+### 11.2 Break-glass posture
+
+- Local Keycloak accounts remain valid when AD/LDAP is down or unconfigured; the page
+  surfaces the local admin count so operators can confirm a break-glass path exists.
+- The demo realm ships local `admin`/`ops`/`field` users; production must rotate these and
+  keep at least one local admin.
+
+### 11.3 Known requirement: Keycloak Admin API service account
+
+- Reading federation status (and running "Sync from Keycloak") requires a confidential
+  client with a service account holding `realm-management` roles (`view-realm`,
+  `view-users`, `query-users`, `query-groups`).
+- **Resolved declaratively:** the realm JSON declares client `versa-cpe-admin`
+  (serviceAccountsEnabled, no browser flows) plus its service-account user with the
+  `realm-management` client-role assignments. Only the secret is injected at import from
+  `KC_ADMIN_CLIENT_SECRET`, and the compose backend env points
+  `KEYCLOAK_ADMIN_CLIENT_ID`/`KEYCLOAK_ADMIN_CLIENT_SECRET` at it. Nothing is configured
+  by clicking or one-off API calls.
+
+### 11.4 Keycloak realm import and environment substitution (gotchas, verified live)
+
+Goal: realm definition (incl. secrets) lives in declarative JSON with values injected from
+the environment — no committed secrets, same mechanism in dev and prod.
+
+Findings on `quay.io/keycloak/keycloak:26.1` (all verified against the live container):
+
+1. **`start-dev --import-realm` does NOT substitute `${...}` placeholders**, and neither
+   does `kc.sh import` with the `env.`-prefixed syntax `${env.XYZ}` — both leave the
+   literal string in the database.
+2. **The import step that DOES substitute is the CLI command `kc.sh import --dir=...`**
+   and it only resolves **bare** `${VAR}` placeholders from the container environment
+   (`const VAR` from env, not system properties).
+3. Therefore keycloak's compose entrypoint is:
+   `/opt/keycloak/bin/kc.sh import --dir=/opt/keycloak/data/import --override=false;
+   exec /opt/keycloak/bin/kc.sh start-dev`. `JAVA_OPTS_APPEND=-Dkeycloak.migration.replace-placeholders=true`
+   is kept for belt-and-braces (harmless).
+4. Placeholders used: `KC_ADMIN_CLIENT_SECRET` (service-account secret) and the demo user
+   passwords `KC_DEMO_ADMIN_PASSWORD` / `KC_DEMO_OPS_PASSWORD` / `KC_DEMO_FIELD_PASSWORD`.
+   Boot-time admin credentials already flow through `KC_BOOTSTRAP_ADMIN_*`.
+5. A gotcha from Keycloak's tracked issues: an env var whose value equals `${VAR}` (or a
+   value containing the placeholder) causes infinite recursion/StackOverflow during import —
+   keep the placeholder value distinct from the placeholder string.
+
+### 11.5 Verification
+
+- Backend: **78 tests** green (added 7: LDAP present/absent, admin-API denied, Keycloak
+  unreachable, break-glass/store counts, endpoint 200 for admin + 403 for non-admin).
+- Frontend: `tsc --noEmit` clean, `vite build` succeeds.
+- Live (fresh `docker compose down -v && up`, realm re-imported):
+  - `GET /api/v1/admin/integrations` → 200; `keycloak.reachable=true`, `console_url`
+    `https://localhost:8443/auth/admin/versa-telecom/console`, `ldap.admin_api_available=true`,
+    `ldap.configured=false` with actionable detail (replace the earlier "Unknown" state),
+    `secret_store=mock_vault healthy`, `director_creds.directors_count=2`,
+    `break_glass.admin_count=1`.
+  - Service account present with all four `realm-management` roles; client secret equals
+    the injected `KC_ADMIN_CLIENT_SECRET`.
+  - `POST /api/v1/admin/sync/users` → `{created:3, updated:0, total:3}`.
+  - Demo logins `admin`/`ops`/`field` resolve passwords from env placeholders.
+
+---
+
+## 12. Readiness Review — Production Testing #1
+
+Review of the full working tree (Phases 1 → 11 plus the uncommitted Phase 2A–2D
+surface) against the MVP requirements document, for the first controlled,
+team-visible testing round. Verdict: **PROCEED with mock-mode testing on the LAN
+box; do NOT scope real CPE rotation into Test #1.**
+
+### 12.1 Verified (12 Sep 2026, on the dev box)
+
+- Backend: **78/78 pytest green** (auth, authorisation, secret redaction/no-leak,
+  rotation success/failure/rollback, bulk concurrency, RBAC).
+- Frontend: `tsc --noEmit` clean, `vite build` succeeds (1.37 MB bundle warning —
+  cosmetic; code-splitting tracked as polish).
+- Tooling present on this box: Docker 29.8.0 + Compose v5.3.1 (daemon up),
+  Node v24.18.0 + npm 11.19.0, Python 3.13 (repo venv), git.
+
+### 12.2 Critical findings — must resolve before/at Test #1
+
+1. **Working tree is uncommitted.** All of Phase 2A–2D (`git status` = 36 modified
+   + 14 untracked files) sits on top of the "Phase 1 scaffold" commit. The team
+   cannot pull/reproduce. Commit (and tag `test-1`) before recommending.
+2. **Real rotation is not implemented.** `VersaDirectorPre23Client.update_credential/
+   verify_credential/get_device_status` raise `NotImplementedError` until lab
+   validation (see `docs/versa-version-matrix.md`). Every rotation today runs the
+   mock client. **Test #1 scope must be "platform/UI/API with mock Director +
+   mock vault"; live CPE rotation stays out of scope.**
+3. **Mock vault is ephemeral.** Compose sets no `MOCK_VAULT_FILE` and mounts no
+   volume; the default `/tmp/mock_vault.enc` dies on container recreate → every
+   `secret_reference` in Postgres hits a "Secret store miss". For a multi-day
+   test, set `MOCK_VAULT_FILE=/data/mock_vault.enc` + a strong
+   `MOCK_VAULT_PASSPHRASE` and add a volume (or accept re-seed + re-rotate).
+4. **Demo field-engineer UAT flow was broken — FIXED.** `seed.py` assigned
+   `demo-field-subject`, but the Keycloak demo `field` user's real `sub` is a
+   UUID → `is_assigned()` never matched → **403 on reveal**; README's "field is
+   pre-assigned to CPE-2213-0001 / CPE-2214-0001" was false in practice. Now the
+   demo users carry deterministic `id`s in `versa-telecom-realm.json`
+   (admin/ops/field = `a1…/a2…/a3…-…`) and `seed.py` assigns by the field ID
+   (`FIELD_DEMO_SUBJECT`); `tests/test_demo_identity.py` (4 tests) locks the
+   seed↔realm contract so they cannot drift again. NOTE: an existing DB seeded
+   before this change still holds the old pseudo-subject — re-import the realm
+   (`docker compose down -v`) to pick up the deterministic IDs.
+5. **Keycloak runs dev mode in compose.** `start-dev` + `KC_HOSTNAME_STRICT=false`
+   are baked into `docker-compose.yml`. Acceptable on the LAN box; if Test #1 is
+   meant to head off production, switch to `start --optimized` first.
+6. **Frontend has no automated tests.** Requirements §16 ask for "frontend tests";
+   `package.json` has none (lint = `tsc --noEmit` only). Either add a smoke test
+   (Vitest + Testing Library) or record this as an accepted gap in the test
+   report.
+7. **Weak/placeholder secrets in `.env`.** DB/REDIS/Keycloak passwords and the
+   demo/bootstrap accounts use `change-me…` values; comfortable only for local
+   play. Strengthen before the box is shared with the team.
+8. **Backup script is documented but not wired.** `scripts/backup-db.sh` is not
+   mounted into the postgres container (`docker compose exec postgres
+   /usr/local/bin/backup-db.sh` fails) and defaults to dumping DB `postgres`, not
+   `versa_cpe`. Fix the mount + `APP_DB` before relying on it.
+
+### 12.3 Acceptable for Test #1 (documented, deliberate)
+
+- Mock secret store (`SECRET_STORE_TYPE=mock_vault`) — explicit DEV-ONLY.
+- Self-signed TLS + HSTS — swap to Corporate PKI before any "live" milestone.
+- Realm import with `${KC_ADMIN_CLIENT_SECRET}` / demo-password placeholders.
+- Admin-only Director TCP probe may contact arbitrary host:port from the DB —
+  bounded 3 s, admin-gated; fine for MVP.
+
+### 12.4 Things needed locally to run Test #1 on this box
+
+- Committed/tagged tree (above) and a browser (Chrome/Edge/Firefox).
+- TLS certs: run `powershell -ExecutionPolicy Bypass -File scripts\generate-certs.ps1`.
+- A filled `.env` (at minimum the `KC_*`/demo passwords; strengthen the
+  `change-me` values). Never commit.
+- `docker compose --profile dev up --build` (includes mock OpenLDAP via dev
+  profile). NOTE: dev profile → `ver-suite` LDAP is mock; AD federation is NOT
+  testable until the AD OU details exist.
+- Smoke path: login `admin`/`ops`/`field` via `https://localhost:8443` →
+  Inventory → detail → reveal (admin) → local test (after 12.2.4 fix) → rotate
+  single + bulk 100 → audit → `/admin/*` surfaces → Integrations page →
+  `POST /admin/sync/users` → `POST /admin/directors/1/sync-cpes` (mock) →
+  `/health` and `/api/docs`.
+- Not available here (out of scope for Test #1): real Versa Directors 22.1.3/
+  22.1.4, AD/LDAP production tree, Corporate PKI. These gate Phase 4, not Test #1.

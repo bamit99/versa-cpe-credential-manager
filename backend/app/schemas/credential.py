@@ -66,7 +66,7 @@ class PasswordPolicyOut(BaseModel):
 
 class PasswordPolicyUpdate(BaseModel):
     length: int = Field(default=24, ge=12, le=128)
-    min_lower: int = Field(default=1, ge=0)
-    min_upper: int = Field(default=1, ge=0)
-    min_digit: int = Field(default=1, ge=0)
-    min_special: int = Field(default=1, ge=0)
+    min_lower: int = Field(default=1, ge=0, le=128)
+    min_upper: int = Field(default=1, ge=0, le=128)
+    min_digit: int = Field(default=1, ge=0, le=128)
+    min_special: int = Field(default=1, ge=0, le=128)

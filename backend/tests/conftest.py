@@ -65,6 +65,27 @@ def operator_user() -> TokenUser:
 
 
 @pytest.fixture()
+def app_client(db_session, admin_user):
+    """Per-test FastAPI test client sharing the db_session with the same overridden auth."""
+    from fastapi.testclient import TestClient
+
+    from app.auth.keycloak import get_current_user
+    from app.db.session import get_db
+    from app.main import app
+
+    def _override_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = lambda: admin_user
+
+    with TestClient(app) as client:
+        yield client
+
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture()
 def field_user() -> TokenUser:
     return TokenUser(subject="sub-field", username="field", roles=["field_engineer"])
 

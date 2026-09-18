@@ -3,6 +3,16 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --frozen-lockfile || npm install
 COPY . .
+
+# Vite inlines VITE_* vars at build time; they MUST arrive as build args.
+ARG VITE_API_URL=/api/v1
+ARG VITE_KEYCLOAK_URL=https://localhost/auth
+ARG VITE_KEYCLOAK_REALM=versa-telecom
+ARG VITE_KEYCLOAK_CLIENT_ID=versa-cpe-manager
+ENV VITE_API_URL=$VITE_API_URL \
+    VITE_KEYCLOAK_URL=$VITE_KEYCLOAK_URL \
+    VITE_KEYCLOAK_REALM=$VITE_KEYCLOAK_REALM \
+    VITE_KEYCLOAK_CLIENT_ID=$VITE_KEYCLOAK_CLIENT_ID
 RUN npm run build
 
 FROM nginx:1.27-alpine

@@ -3,6 +3,7 @@ from app.models.cpe import CPE, Director, User
 from app.models.credential import Credential, RotationState, CredentialStatus
 from app.models.access import AccessRequest, CPEAssignment
 from app.models.audit import AuditEvent
+from app.models.setting import AppSetting
 
 __all__ = [
     "CPE",
@@ -14,4 +15,5 @@ __all__ = [
     "AccessRequest",
     "CPEAssignment",
     "AuditEvent",
+    "AppSetting",
 ]

@@ -25,6 +25,38 @@ class PasswordPolicy:
             f"digit>={self.min_digit}, special>={self.min_special}"
         )
 
+    def validate(self) -> None:
+        """Raise ValueError when the guaranteed classes exceed the length."""
+        guaranteed = (
+            self.min_lower + self.min_upper + self.min_digit + self.min_special
+        )
+        if self.length < guaranteed:
+            raise ValueError(
+                "Password policy length is smaller than the guaranteed character count"
+            )
+
+
+def policy_to_dict(policy: PasswordPolicy) -> dict:
+    return {
+        "length": policy.length,
+        "min_lower": policy.min_lower,
+        "min_upper": policy.min_upper,
+        "min_digit": policy.min_digit,
+        "min_special": policy.min_special,
+    }
+
+
+def policy_from_dict(data: dict) -> PasswordPolicy:
+    policy = PasswordPolicy(
+        length=int(data.get("length", PasswordPolicy.length)),
+        min_lower=int(data.get("min_lower", PasswordPolicy.min_lower)),
+        min_upper=int(data.get("min_upper", PasswordPolicy.min_upper)),
+        min_digit=int(data.get("min_digit", PasswordPolicy.min_digit)),
+        min_special=int(data.get("min_special", PasswordPolicy.min_special)),
+    )
+    policy.validate()
+    return policy
+
 
 def _charset_and_guarantees(policy: PasswordPolicy) -> tuple[str, list[str]]:
     buckets: list[str] = [

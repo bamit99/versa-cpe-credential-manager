@@ -32,3 +32,59 @@ def test_csv_import(db_session, admin_user):
     result = CPEService(db_session).import_csv(csv_content, admin_user)
     assert result == {"created": 2, "updated": 0}
     assert CPEService(db_session).get("IM-1").serial_number == "SN1"
+
+
+def _add_cpe_with_credential(db_session, cpe_id, *, rotation_state="ACTIVE"):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.cpe import CPE
+    from app.models.credential import Credential
+
+    cpe = CPE(cpe_id=cpe_id, device_name=f"dev {cpe_id}", site="Lab", status="online")
+    db_session.add(cpe)
+    db_session.flush()
+    db_session.add(
+        Credential(
+            cpe_id=cpe.id,
+            username="admin",
+            secret_reference=f"cred:{cpe_id}-{rotation_state}",
+            version=1,
+            status="ACTIVE",
+            rotation_state=rotation_state,
+            activated_at=datetime.now(timezone.utc) - timedelta(days=400),
+            last_rotated_at=datetime.now(timezone.utc) - timedelta(days=400),
+        )
+    )
+    db_session.commit()
+    return cpe
+
+
+def test_list_needs_rotation_only_returns_due_cpes(db_session, admin_user):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.credential import Credential
+
+    service = CPEService(db_session)
+    _add_cpe_with_credential(db_session, "CPE-DUE-1")
+    _add_cpe_with_credential(db_session, "CPE-DUE-2")
+    fresh_cpe = _add_cpe_with_credential(db_session, "CPE-FRESH-1")
+    # Reset its rotation metadata to "just rotated" (not due).
+    cred = db_session.query(Credential).filter(Credential.cpe_id == fresh_cpe.id).one()
+    cred.last_rotated_at = datetime.now(timezone.utc) - timedelta(days=1)
+    db_session.commit()
+
+    rows, total = service.list(needs_rotation=True, page_size=100)
+    ids = {c.cpe_id for c in rows}
+    assert "CPE-DUE-1" in ids and "CPE-DUE-2" in ids
+    assert "CPE-FRESH-1" not in ids
+    assert total == 2
+
+
+def test_list_needs_rotation_counts_rotation_failed(db_session, admin_user):
+    from app.models.credential import RotationState
+
+    service = CPEService(db_session)
+    _add_cpe_with_credential(db_session, "CPE-FAIL-1", rotation_state=RotationState.ROTATION_FAILED.value)
+    rows, total = service.list(needs_rotation=True, page_size=100)
+    assert {c.cpe_id for c in rows} == {"CPE-FAIL-1"}
+    assert total == 1

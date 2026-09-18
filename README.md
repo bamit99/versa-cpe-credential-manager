@@ -37,13 +37,22 @@ filenames, no code change).
 
 ### Demo identity (dev realm, disabled in prod configuration)
 
-Realm `versa-telecom` is auto-imported on first Keycloak start:
+Realm `versa-telecom` is imported on first Keycloak start. Import runs an explicit
+`kc.sh import` step before `start-dev`, so `keycloak/realm-config/versa-telecom-realm.json`
+can reference environment variables with bare `${VAR}` placeholders (secrets are never
+committed). The followed values are set in `.env`:
 
-| Username | Password      | Realm role          |
-|----------|---------------|---------------------|
-| `admin`  | `Admin12345!` | admin               |
-| `ops`    | `Ops12345!`   | security_operator   |
-| `field`  | `Field12345!` | field_engineer      |
+| Username | Password            | Realm role          |
+|----------|---------------------|---------------------|
+| `admin`  | `KC_DEMO_ADMIN_PASSWORD`  | admin               |
+| `ops`    | `KC_DEMO_OPS_PASSWORD`    | security_operator   |
+| `field`  | `KC_DEMO_FIELD_PASSWORD`  | field_engineer      |
+
+The backend's Keycloak admin access is also wired declaratively: the
+`versa-cpe-admin` client (confidential, service account, secret
+`KC_ADMIN_CLIENT_SECRET`, realm-management `view-realm`/`view-users`/`query-users`/
+`query-groups`) is part of the realm import and drives "Sync from Keycloak" plus the
+Integrations page's LDAP status.
 
 Demo data (seeded automatically by the backend container):
 
@@ -135,12 +144,14 @@ authorised reveal endpoint.
 
 ## Production Notes (on-premise / corporate LAN)
 
+> Full step-by-step runbook: `docs/production-deployment.md`.
+
 1. **Certificate**: replace self-signed certs with Corporate PKI (same filenames).
 2. **Keycloak → AD**: `Realm settings → User Federation → Add LDAP provider` using
-   `keycloak/realm-config/ldap-federation.json` as a reference once AD details are
+   `keycloak/realm-config/ldap-federation.json.example` as a reference once AD details are
    provided. Use LDAPS (636). Edit mode `READ_ONLY` keeps AD authoritative.
-3. **Recovery mode**: boot Keycloak with `start --optimized --import-realm` instead of
-   `start-dev`.
+3. **Recovery mode**: boot Keycloak with `start --optimized` instead of `start-dev`
+   (the compose entrypoint runs the same `kc.sh import` realm import either way).
 4. **Database**: secure passwords in `.env`; never commit. Backups are provided via
    `scripts/backup-db.sh` as an integration point for the existing backup solution.
 5. **Networking**: only nginx ports (80/443) exposed to the LAN. LDAPS (636) must be

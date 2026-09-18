@@ -1,7 +1,6 @@
 """Credential access endpoints (authorised reveal)."""
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Request
@@ -54,6 +53,7 @@ def reveal_credential(
         source_ip=source_ip,
         user_agent=user_agent,
         assignments=AssignmentService(db),
+        display_timeout_seconds=settings.credential_display_timeout_seconds,
     )
     return CredentialRevealResponse(
         username=cred.username,
@@ -82,6 +82,8 @@ def credential_metadata(
         "username": cred.username,
         "version": cred.version,
         "status": cred.status,
+        "rotation_state": cred.rotation_state,
         "last_accessed_at": cred.last_accessed_at,
         "last_rotated_at": cred.last_rotated_at,
+        "next_rotation_at": cred.next_rotation_at,
     }

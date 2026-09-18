@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 
 from app.config import Settings, get_settings
 from app.models.cpe import CPE, Director
+from app.services.secret_store.base import SecretStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,15 +38,15 @@ class VersaClient(ABC):
         """Pull the full CPE inventory from the Director (used by sync)."""
 
 
-def build_versa_client(director: Director | None = None, settings: Settings | None = None) -> VersaClient:
+def build_versa_client(
+    director: Director | None = None,
+    settings: Settings | None = None,
+    secret_store: SecretStore | None = None,
+) -> VersaClient:
     settings = settings or get_settings()
-    store_type = settings.secret_store_type  # reuse flag: in dev, always mock
-    if store_type == "mock_vault" or director is None:
+    # In development (mock vault) we never touch a real Director.
+    if settings.secret_store_type == "mock_vault" or director is None:
         from app.adapters.versa.mock_versa import MockVersaClient
         return MockVersaClient()
-    # Future: VersaDirectorPre23Client for the real Director
-    # from app.adapters.versa.director22 import VersaDirectorPre23Client
-    # return VersaDirectorPre23Client(director, settings)
-    from app.adapters.versa.mock_versa import MockVersaClient
-    logger.info("Real Versa client not yet implemented; falling back to mock for director %s", director.name)
-    return MockVersaClient()
+    from app.adapters.versa.director22 import VersaDirectorPre23Client
+    return VersaDirectorPre23Client(director, settings, secret_store)

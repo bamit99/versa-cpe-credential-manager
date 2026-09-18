@@ -21,3 +21,12 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def get_session_factory() -> sessionmaker:
+    """Session factory for worker contexts that need their own sessions.
+
+    Bulk operations (e.g. concurrent rotation) must not share a single request
+    session across threads; each unit of work builds its own session from here.
+    """
+    return SessionLocal

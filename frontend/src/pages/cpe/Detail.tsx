@@ -38,6 +38,14 @@ export default function DetailPage() {
   const [countdown, setCountdown] = useState(0);
   const roles = getRoles();
 
+  const rotationFailed = cred != null && cred.rotation_state === "ROTATION_FAILED";
+  const rotationInProgress =
+    cred != null &&
+    cred.rotation_state !== "ACTIVE" &&
+    !rotationFailed;
+  const rotationDue = cred?.next_rotation_at != null &&
+    new Date(cred.next_rotation_at).getTime() <= Date.now();
+
   const load = async (): Promise<void> => {
     const resp = await api.get<CPE>(`/cpes/${cpeId}`);
     setCpe(resp.data);
@@ -116,6 +124,22 @@ export default function DetailPage() {
       </Card>
 
       <Card title="Credential">
+        {rotationFailed && (
+          <Alert
+            type="error"
+            style={{ marginBottom: 16 }}
+            message="Last rotation failed — the previous credential is still active and a retry is available."
+            showIcon
+          />
+        )}
+        {rotationInProgress && (
+          <Alert
+            type="warning"
+            style={{ marginBottom: 16 }}
+            message={`Rotation in progress (state: ${cred?.rotation_state}). New rotations are blocked until it completes.`}
+            showIcon
+          />
+        )}
         <Descriptions column={1} bordered size="small">
           <Descriptions.Item label="Username">{cred?.username ?? "—"}</Descriptions.Item>
           <Descriptions.Item label="Version">{cred?.version ?? "—"}</Descriptions.Item>
@@ -123,6 +147,11 @@ export default function DetailPage() {
             {cred?.status ? <Tag>{cred.status}</Tag> : "—"}
           </Descriptions.Item>
           <Descriptions.Item label="Last Rotation">{cred?.last_rotated_at ?? "—"}</Descriptions.Item>
+          <Descriptions.Item label="Next Rotation">
+            {cred?.next_rotation_at
+              ? `${new Date(cred.next_rotation_at).toLocaleString()} ${rotationDue ? "(due)" : ""}`
+              : "—"}
+          </Descriptions.Item>
           <Descriptions.Item label="Last Access">{cred?.last_accessed_at ?? "—"}</Descriptions.Item>
         </Descriptions>
 

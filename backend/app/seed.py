@@ -5,6 +5,7 @@ Creates demo Directors, CPEs, credentials and field-engineer assignments.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,12 +36,17 @@ DEMO_CPES = [
     ("CPE-2214-0003", "BR-EDGE-KOL-01", "VS-2214-00000003", "Kolkata DC", "10.20.3.11", 1, "unknown"),
 ]
 
-# Which demo user subject owns which CPE (Keycloak demo user 'field' → subject placeholder).
-# For MVP the assignment is by Keycloak subject; the demo realm user ids are resolved
-# at login. We assign to a deterministic pseudo-subject for the demo seed.
+# Deterministic Keycloak subjects for the demo realm users (see
+# keycloak/realm-config/versa-telecom-realm.json `id` fields). Matching the
+# assignment subject to the real Keycloak `sub` is what makes the field-engineer
+# reveal flow work end to end; keep the two files in sync.
+FIELD_DEMO_SUBJECT = "a3333333-3333-3333-3333-333333333333"
+
+# Which demo user subject owns which CPE. The `field` demo user's Keycloak
+# subject (above) is pre-assigned so a first-login reveal works without admin action.
 DEMO_ASSIGNMENTS = [
-    ("demo-field-subject", "CPE-2213-0001"),
-    ("demo-field-subject", "CPE-2214-0001"),
+    (FIELD_DEMO_SUBJECT, "CPE-2213-0001"),
+    (FIELD_DEMO_SUBJECT, "CPE-2214-0001"),
 ]
 
 
@@ -91,6 +97,7 @@ def _seed_cpes(db: Session, directors: dict[str, Director], store) -> None:
             version=1,
             status="ACTIVE",
             rotation_state="ACTIVE",
+            activated_at=datetime.now(timezone.utc),
         )
         db.add(cred)
     db.commit()

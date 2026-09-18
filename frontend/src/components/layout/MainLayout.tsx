@@ -3,8 +3,14 @@ import {
   DashboardOutlined,
   ClusterOutlined,
   AuditOutlined,
+  SyncOutlined,
+  SettingOutlined,
+  GlobalOutlined,
+  TeamOutlined,
+  UserOutlined,
   LogoutOutlined,
   SafetyCertificateOutlined,
+  ApiOutlined,
 } from "@ant-design/icons";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "../../store/authStore";
@@ -22,7 +28,25 @@ export default function MainLayout() {
     { key: "/dashboard", icon: <DashboardOutlined />, label: "Dashboard" },
     { key: "/cpe", icon: <ClusterOutlined />, label: "CPE Inventory" },
     roles.includes("security_operator") || roles.includes("admin")
+      ? { key: "/rotation", icon: <SyncOutlined />, label: "Rotation" }
+      : null,
+    roles.includes("security_operator") || roles.includes("admin")
       ? { key: "/audit", icon: <AuditOutlined />, label: "Audit Log" }
+      : null,
+    roles.includes("admin")
+      ? { key: "/admin/directors", icon: <GlobalOutlined />, label: "Directors" }
+      : null,
+    roles.includes("admin")
+      ? { key: "/admin/assignments", icon: <TeamOutlined />, label: "Assignments" }
+      : null,
+    roles.includes("admin")
+      ? { key: "/admin/users", icon: <UserOutlined />, label: "Users" }
+      : null,
+    roles.includes("admin")
+      ? { key: "/admin/integrations", icon: <ApiOutlined />, label: "Integrations" }
+      : null,
+    roles.includes("admin")
+      ? { key: "/admin/settings", icon: <SettingOutlined />, label: "Settings" }
       : null,
   ].filter(Boolean) as { key: string; icon: React.ReactNode; label: string }[];
 

@@ -62,6 +62,12 @@ class ImportResult(BaseModel):
     updated: int
 
 
+class SyncCpesResult(BaseModel):
+    discovered: int
+    created: int
+    updated: int
+
+
 class DirectorCreate(BaseModel):
     name: str
     host: str
@@ -71,6 +77,16 @@ class DirectorCreate(BaseModel):
     oauth_secret_ref: str | None = None
 
 
+class DirectorUpdate(BaseModel):
+    name: str | None = None
+    host: str | None = None
+    api_base_url: str | None = None
+    versa_version: str | None = Field(default=None, pattern=r"^22\.1\.[34]$")
+    oauth_client_id: str | None = None
+    oauth_secret_ref: str | None = None
+    enabled: bool | None = None
+
+
 class DirectorOut(BaseModel):
     id: int
     name: str
@@ -78,11 +94,42 @@ class DirectorOut(BaseModel):
     api_base_url: str
     versa_version: str
     enabled: bool
+    capabilities: dict[str, bool] = {}
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
+class DirectorStatusOut(BaseModel):
+    reachable: bool
+    detail: str | None = None
+    latency_ms: int | None = None
+
+
 class AssignmentRequest(BaseModel):
     user_subject: str
     cpe_id: str
+
+
+class AssignmentOut(BaseModel):
+    user_subject: str
+    username: str | None = None
+    cpe_id: str
+    device_name: str | None = None
+    site: str | None = None
+    assigned_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserOut(BaseModel):
+    subject: str
+    username: str
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    roles: list[str]
+    enabled: bool
+    last_login_at: datetime | None = None
+
+    model_config = {"from_attributes": True}

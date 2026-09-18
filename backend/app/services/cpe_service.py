@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import csv
 import io
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.auth.keycloak import TokenUser
+from app.config import get_settings
 from app.models.access import CPEAssignment
-from app.models.cpe import CPE, Director
+from app.models.cpe import CPE, Director, User
+from app.models.credential import Credential, CredentialStatus, RotationState
 from app.services.audit_service import AuditActions, AuditService
 
 _MAX_IMPORT_ROWS = 10_000
@@ -86,6 +89,8 @@ class CPEService:
         search: str | None = None,
         status_filter: str | None = None,
         site: str | None = None,
+        director_id: int | None = None,
+        needs_rotation: bool = False,
         sort_by: str = "cpe_id",
         sort_desc: bool = False,
         page: int = 1,
@@ -105,6 +110,13 @@ class CPEService:
             stmt = stmt.where(CPE.status == _normalise_status(status_filter))
         if site:
             stmt = stmt.where(CPE.site == site)
+        if director_id is not None:
+            stmt = stmt.where(CPE.director_id == director_id)
+        if needs_rotation:
+            stmt = stmt.join(Credential, Credential.cpe_id == CPE.id).where(
+                Credential.status == CredentialStatus.ACTIVE.value,
+                self._needs_rotation_condition(),
+            )
 
         order_col = getattr(CPE, sort_by, CPE.cpe_id)
         stmt = stmt.order_by(order_col.desc() if sort_desc else order_col.asc())
@@ -115,19 +127,29 @@ class CPEService:
         )
         return rows, int(total)
 
-    def import_csv(self, content: str, user: TokenUser) -> dict:
-        reader = csv.DictReader(io.StringIO(content))
-        expected = {"cpe_id", "device_name", "serial_number", "site", "management_ip"}
-        if reader.fieldnames is None or not expected.intersection(reader.fieldnames):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"CSV must contain at least one of: {sorted(expected)}",
-            )
+    @staticmethod
+    def _needs_rotation_condition():
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=get_settings().rotation_due_days)
+        return or_(
+            Credential.rotation_state == RotationState.ROTATION_FAILED.value,
+            Credential.next_rotation_at.isnot(None) & (Credential.next_rotation_at <= now),
+            Credential.next_rotation_at.is_(None)
+            & Credential.last_rotated_at.isnot(None)
+            & (Credential.last_rotated_at <= cutoff),
+            Credential.next_rotation_at.is_(None)
+            & Credential.last_rotated_at.is_(None)
+            & Credential.activated_at.isnot(None)
+            & (Credential.activated_at <= cutoff),
+        )
+
+    def upsert_cpes(self, rows, user: TokenUser) -> tuple[int, int]:
+        """Create-or-update CPE rows from discovery/import dicts. Returns (created, updated)."""
         created = updated = 0
-        for i, row in enumerate(reader):
+        for i, row in enumerate(rows):
             if i >= _MAX_IMPORT_ROWS:
                 break
-            cpe_id = (row.get("cpe_id") or "").strip()
+            cpe_id = str(row.get("cpe_id") or "").strip()
             if not cpe_id:
                 continue
             existing = self._db.scalar(select(CPE).where(CPE.cpe_id == cpe_id))
@@ -137,6 +159,18 @@ class CPEService:
             else:
                 self.create(row, None, user)
                 created += 1
+        return created, updated
+
+    def import_csv(self, content: str, user: TokenUser) -> dict:
+        reader = csv.DictReader(io.StringIO(content))
+        expected = {"cpe_id", "device_name", "serial_number", "site", "management_ip"}
+        if reader.fieldnames is None or not expected.intersection(reader.fieldnames):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"CSV must contain at least one of: {sorted(expected)}",
+            )
+        rows = [row for row in reader if (row.get("cpe_id") or "").strip()]
+        created, updated = self.upsert_cpes(rows, user)
         self._audit.record(
             action=AuditActions.CPE_IMPORTED,
             user=user,
@@ -180,3 +214,52 @@ class AssignmentService:
             )
             is not None
         )
+
+    def unassign(self, user_subject: str, cpe_id: str, admin: TokenUser, audit: AuditService) -> None:
+        if self._db.scalar(select(CPE).where(CPE.cpe_id == cpe_id)) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CPE not found")
+        row = self._db.scalar(
+            select(CPEAssignment).where(
+                CPEAssignment.user_subject == user_subject,
+                CPEAssignment.cpe_id == cpe_id,
+            )
+        )
+        if row is None:
+            return
+        self._db.delete(row)
+        self._db.commit()
+        audit.record(
+            action=AuditActions.CPE_UNASSIGNED,
+            user=admin,
+            cpe_id=cpe_id,
+            metadata_json=f'{{"target_user":"{user_subject}"}}',
+        )
+
+    def list(self, user_subject: str | None = None) -> list[dict]:
+        """Return assignment rows joined with user identity and device details."""
+        stmt = (
+            select(
+                CPEAssignment,
+                User.username,
+                CPE.device_name,
+                CPE.site,
+            )
+            .outerjoin(User, User.subject == CPEAssignment.user_subject)
+            .outerjoin(CPE, CPE.cpe_id == CPEAssignment.cpe_id)
+            .order_by(CPEAssignment.cpe_id)
+        )
+        if user_subject:
+            stmt = stmt.where(CPEAssignment.user_subject == user_subject)
+        out: list[dict] = []
+        for assignment, username, device_name, site in self._db.execute(stmt).all():
+            out.append(
+                {
+                    "user_subject": assignment.user_subject,
+                    "username": username,
+                    "cpe_id": assignment.cpe_id,
+                    "device_name": device_name,
+                    "site": site,
+                    "assigned_at": assignment.created_at,
+                }
+            )
+        return out

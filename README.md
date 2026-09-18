@@ -134,6 +134,9 @@ cd backend
 pytest -q
 ```
 
+For the manual, ops-facing lab walkthrough (Test #1), use
+`docs/test-1-lab-runbook.md`.
+
 Coverage targets (per requirements): auth, authorisation, credential randomness,
 secret-store interactions, retrieval + authorisation, audit generation, rotation
 success/failure/rollback, bulk concurrency, secret redaction, RBAC. A dedicated test

@@ -572,9 +572,9 @@ box; do NOT scope real CPE rotation into Test #1.**
 - TLS certs: run `powershell -ExecutionPolicy Bypass -File scripts\generate-certs.ps1`.
 - A filled `.env` (at minimum the `KC_*`/demo passwords; strengthen the
   `change-me` values). Never commit.
-- `docker compose --profile dev up --build` (includes mock OpenLDAP via dev
-  profile). NOTE: dev profile → `ver-suite` LDAP is mock; AD federation is NOT
-  testable until the AD OU details exist.
+- `docker compose --profile dev up --build`. Mock OpenLDAP is currently DISABLED
+  in the compose file (see §13) — the Keycloak realm has no user federation yet.
+  AD federation is NOT testable until the AD OU details exist.
 - Smoke path: login `admin`/`ops`/`field` via `https://localhost:8443` →
   Inventory → detail → reveal (admin) → local test (after 12.2.4 fix) → rotate
   single + bulk 100 → audit → `/admin/*` surfaces → Integrations page →
@@ -582,3 +582,46 @@ box; do NOT scope real CPE rotation into Test #1.**
   `/health` and `/api/docs`.
 - Not available here (out of scope for Test #1): real Versa Directors 22.1.3/
   22.1.4, AD/LDAP production tree, Corporate PKI. These gate Phase 4, not Test #1.
+
+## 13. Test #1 bring-up fixes (post-§12)
+
+Recorded at first local launch of the Test #1 stack (Sept 2026).
+
+### 13.1 nginx `/auth/` rate limit 503'd the login-session flow
+
+- **Symptoms:** login page error "Unable to contact the identity provider. Is
+  Keycloak running?" while nginx logged `limiting requests, excess: 5.9 by zone
+  "auth"` → 503 on `/auth/.../3p-cookies/step1.html`,
+  `/auth/.../login-status-iframe.html`, and login-page assets. The credential
+  POST actually succeeded (302) and the token endpoint returned 200 — the 503s
+  after login broke the SPA's session check.
+- **Cause:** the old `/auth/` proxy applied `limit_req zone=auth rate=5r/m
+  burst=5`. A single login + session check legitimately issues ~20 requests to
+  `/auth/` per minute (page assets, 3p-cookies, login-status iframe), exceeding
+  the burst instantly.
+- **Fix (`nginx/nginx.conf`):** remove the blanket limit from `location /auth/`;
+  add a regex location limiting only the credential-verifying endpoints
+  (`login-actions/authenticate`, `protocol/openid-connect/token`) at `30r/m
+  burst=10`.
+- **Backstop:** enabled Keycloak realm brute-force detection in
+  `keycloak/realm-config/versa-telecom-realm.json`
+  (`bruteForceProtected: true`, strategy MULTIPLE, `failureFactor: 30`, max wait
+  900s, incremental 60s). Password-guessing protection now lives in Keycloak,
+  not a fragile nginx burst bucket. NOTE: nginx rate limiting is still
+  distance-based (per-source-IP, behind NAT) and should be re-tuned against a
+  real AD deployment.
+
+### 13.2 Mock OpenLDAP disabled (osixia image won't boot here)
+
+- **Symptom:** `osixia/openldap:1.5.0` crash-loops with `slapd failed with
+  status 1/2` — first `chown ... Read-only file system` on the bootstrapped
+  `ldif/custom` mount, then, once the mount was made writable, missing generated
+  template files (`tls-enable.ldif`, `replication-disable.ldif`,
+  `root-password-change.ldif`) inside the image regardless of `LDAP_TLS=false`.
+- **Decision:** the service is commented out of `docker-compose.yml` and removed
+  from the running stack. Nothing depends on it today — the realm's
+  `userFederationProviders` is empty, so Login/RBAC/app flows are unaffected.
+  Re-enable when the AD/LDAP federation feature is being built (§3/4),
+  possibly with a different image or a health-checked bootstrap.
+- Runbook prerequisite count reflects **6 containers** (backend, frontend,
+  keycloak, nginx, postgres, redis).

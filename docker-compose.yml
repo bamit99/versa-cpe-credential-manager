@@ -129,22 +129,25 @@ services:
     restart: unless-stopped
 
   # ─── MOCK LDAP (development-only) ─────────────────────────
-  # Active in dev (`docker compose --profile dev up`). Points Keycloak
-  # at a local OpenLDAP so RBAC/login works before corporate AD is wired.
-  openldap:
-    image: osixia/openldap:1.5.0
-    profiles: ["dev"]
-    environment:
-      - LDAP_ORGANISATION=Versa Telecom Dev
-      - LDAP_DOMAIN=versa-dev.local
-      - LDAP_ADMIN_PASSWORD=admin
-      - LDAP_READONLY_USER=true
-      - LDAP_READONLY_USER_PASSWORD=readonly
-    volumes:
-      - ./keycloak/ldap-config:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro
-    networks:
-      - ldap-net
-    restart: unless-stopped
+  # DISABLED: osixia/openldap:1.5.0 fails to boot on this box (its generated
+  # tls/replication/admin LDIF templates are missing from the image layers,
+  # regardless of LDAP_TLS). No service depends on it today — the Keycloak
+  # realm has empty userFederationProviders, so the app runs fine without it.
+  # Re-enable when the AD/LDAP federation feature is actually wired (Phase 3/4).
+  # openldap:
+  #   image: osixia/openldap:1.5.0
+  #   profiles: ["dev"]
+  #   environment:
+  #     - LDAP_ORGANISATION=Versa Telecom Dev
+  #     - LDAP_DOMAIN=versa-dev.local
+  #     - LDAP_ADMIN_PASSWORD=admin
+  #     - LDAP_READONLY_USER=true
+  #     - LDAP_READONLY_USER_PASSWORD=readonly
+  #   volumes:
+  #     - ./keycloak/ldap-config:/container/service/slapd/assets/config/bootstrap/ldif/custom
+  #   networks:
+  #     - ldap-net
+  #   restart: unless-stopped
 
 networks:
   frontend-net:

@@ -213,6 +213,9 @@ curl -sk https://cpe-mgr.corp.example.com/auth/realms/versa-telecom/.well-known/
 Any `5xx`, "Secret store miss", or 403 on the field reveal = stop and log before
 proceeding.
 
+> Full click-by-click test matrix with pass/fail fields and a sign-off sheet:
+> `docs/test-1-lab-runbook.md`.
+
 ---
 
 ## 9. Production hardening (before opening access to the team)

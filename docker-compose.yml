@@ -83,6 +83,7 @@ services:
       - KC_METRICS_ENABLED=true
       - KC_PROXY_HEADERS=xforwarded
       - KC_HOSTNAME=https://localhost:${NGINX_HTTPS_PORT:-443}/auth
+      - KC_HOSTNAME_ADMIN=https://localhost:${NGINX_HTTPS_PORT:-443}/auth
       - KC_HTTP_RELATIVE_PATH=/auth
       - KC_HOSTNAME_STRICT=false
     volumes:

@@ -625,3 +625,94 @@ Recorded at first local launch of the Test #1 stack (Sept 2026).
   possibly with a different image or a health-checked bootstrap.
 - Runbook prerequisite count reflects **6 containers** (backend, frontend,
   keycloak, nginx, postgres, redis).
+
+### 13.3 "Dashboard flashes then refresh-loops back to login" after the stack restarts
+
+- **Symptom:** after `docker compose down -v` + re-up, a browser tab that still
+  holds a session from the OLD realm briefly shows the dashboard then
+  hard-refreshes in a loop until it lands back on the Keycloak login screen.
+- **Cause:** the `down -v` wiped the realm/keyring, so the tab's stored access +
+  refresh tokens are dead (unknown `kid`/revoked refresh grant). The SPA's API
+  client does `window.location.reload()` on any 401
+  (`frontend/src/services/api.ts`), so a dead token forces a reload loop instead
+  of a graceful re-auth. Verified not-a-backend-bug: a fresh token issued via the
+  OIDC code flow passes validation and returns `200` on `/api/v1/dashboard`.
+- **Lab impact:** one-time, self-resolving; a fresh (incognito) browser session
+  logs in cleanly. Not a Test #1 blocker.
+- **Follow-up (product polish, not needed for Test #1):** on 401, redirect to
+  Keycloak's `login()` (or `logout()` + login) instead of blind
+  `window.location.reload()` to avoid the loop when a token is revoked
+  server-side.
+
+### 13.4 The real login-loop bug: `updateToken()` return value misread
+
+- **Symptoms (downgraded from 13.3):** the dashboard still flashed and the page
+  logged in again and again even in a fresh incognito window; backend logged 401s
+  on every `/api/v1/dashboard` call; brute-force lockout kept tripping the demo
+  users. (Discussed *briefly* by 13.3's "follow-up" but the true cause is below.)
+- **Root cause:** keycloak-js **v26** `updateToken()` resolves `false` when the
+  token is *still valid* ("no refresh needed") — not only on failure (bundle:
+  `if(!n)return false`). The SPA's axios request interceptor
+  (`frontend/src/services/api.ts`) treated that boolean as "no login / no token",
+  dropped the `Authorization` header on every call, and the 401 response
+  interceptor `window.location.reload()`ed → infinite reload/login loop.
+  Confirmed instrumented: every request arrived at the backend WITHOUT a bearer
+  token, while a curl-replayed token from the same Keycloak validated fine and
+  returned `200`.
+- **Secondary contributor (13.1):** the reload loop hammered the nginx-throttled
+  `/token` endpoint (~7 POSTs in 2 s), so the throttled exchange 503'd and made
+  the loop self-sustaining. Removing the loop removes the storm.
+- **Fix:** interceptor now calls `refreshToken()` as best-effort and attaches
+  whatever token keycloak-js holds; the `updateToken()` return value no longer
+  gates the header. Frontend rebuilt (new bundle hash in the running container).
+  No nginx/realm change needed.
+- **Manual test recorded:** full OIDC code+PKCE flow replayed via curl: `sub`
+  = `a1111111-…` (admin), `iss` = `https://localhost:8443/auth/realms/versa-telecom`,
+  `aud` = [versa-cpe-manager, account] — all match backend validation → `200`.
+
+### 13.5 Admin-only tabs silently bounced to Dashboard: `authStore.roles` never populated
+
+- **Symptoms:** after login (any account) the left menu showed every item (the
+  menu filters via `getRoles()` from the token), but clicking `/audit`,
+  `/rotation` or any `/admin/*` page did nothing — content never changed and the
+  backend logged **no request**. Dashboard + CPE Inventory (the only role-less
+  routes) were the only working tabs.
+- **Root cause:** `frontend/src/store/authStore.ts` declared `roles: []` and
+  **never set it** in `init()`/`signIn()`. `ProtectedRoute` checks
+  `authStore.roles`, so every role-gated route re-rendered as
+  `<Navigate to="/dashboard"/>` — a silent redirect before any API call.
+- **Fix:** populate `roles: getRoles()` after a successful
+  `login()`/`keycloak.init()` inside both `init()` and `signIn()` (reads
+  realm_access + resource_access roles from `tokenParsed`). Frontend rebuilt.
+- **Lesson:** role-based visibility in the menu and role-based route guards must
+  read the SAME store. They now do.
+
+### 13.6 Keycloak Admin Console link dropped the port (→ `https://localhost`)
+
+- **Symptoms:** the Integrations page "Open Keycloak Admin Console" button
+  (`/api/v1/admin/integrations` → `console_url` = the correct
+  `https://localhost:8443/auth/admin/versa-telecom/console`) was answered by
+  Keycloak with `302 Location: https://localhost/auth/…/console/` — no port —
+  landing on nothing.
+- **Root cause:** the **admin** hostname is resolved separately from the
+  frontend hostname (`KC_HOSTNAME_ADMIN`); with only `KC_HOSTNAME` set, the
+  admin-console redirect fell back to a default that dropped the non-standard
+  port (proven empirically: discovery/issuer and login all used 8443 correctly,
+  only the `/admin/*/console` redirect lost it; `X-Forwarded-Port` to Keycloak
+  was also ignored). Also added an nginx `X-Forwarded-Port` map from the Host
+  header (correct hygiene for `KC_PROXY_HEADERS=xforwarded`, kept).
+- **Fix:** set `KC_HOSTNAME_ADMIN=https://localhost:${NGINX_HTTPS_PORT:-443}/auth`
+  in `docker-compose.yml`; recreate the keycloak container (realm data lives in
+  Postgres, so it survives). Console now resolves to
+  `https://localhost:8443/auth/admin/versa-telecom/console/` (200). Log in with
+  the bootstrap `KC_ADMIN_USERNAME` / `KC_ADMIN_PASSWORD`.
+- **Note:** while investigating, patched `nginx.conf` to forward
+  `X-Forwarded-Port` (derived from `$http_host`) in both `/auth/` locations.
+
+### 13.7 Integrations page is intentionally read-only
+
+- By design: the page (front-end `Integrations.tsx` + backend `/admin/integrations`)
+  reports dependency health only. LDAP/AD federation and identity-provider
+  settings are changed in the Keycloak Admin Console; secret-store backend and
+  Director API credentials come from environment configuration. The card's
+  in-app `Alert` states this explicitly.

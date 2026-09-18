@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { login, logout } from "../services/keycloak";
+import { login, logout, getRoles } from "../services/keycloak";
 
 interface AuthState {
   initialised: boolean;
@@ -18,7 +18,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   init: async () => {
     try {
       await login();
-      set({ authenticated: true, initialised: true });
+      set({ authenticated: true, initialised: true, roles: getRoles() });
     } catch {
       set({ authenticated: false, initialised: true });
     }
@@ -26,7 +26,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   signIn: async () => {
     await login();
-    set({ authenticated: true, initialised: true });
+    set({ authenticated: true, initialised: true, roles: getRoles() });
   },
 
   signOut: () => {

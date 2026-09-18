@@ -7,11 +7,10 @@ const api = axios.create({
 });
 
 api.interceptors.request.use(async (config) => {
-  const ok = await refreshToken().catch(() => false);
-  if (!ok) {
-    // Force re-login downstream via 401.
-    return config;
-  }
+  // Refresh best-effort, then attach whatever token keycloak-js holds.
+  // NOTE: keycloak-js v26 updateToken() resolves FALSE when the token is still
+  // valid ("no refresh needed") — its return value must NOT gate the header.
+  await refreshToken().catch(() => false);
   const token = getToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;

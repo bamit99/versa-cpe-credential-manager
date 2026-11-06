@@ -19,8 +19,9 @@ cp .env.example .env          # then edit the generated values
 #    (Docker): bash scripts/generate-certs.sh
 #    (Windows): powershell -ExecutionPolicy Bypass -File scripts\generate-certs.ps1
 
-# 3. Start the stack (includes mock OpenLDAP via the dev profile)
-docker compose --profile dev up --build
+# 3. Start the stack
+#    (the mock OpenLDAP service is disabled until AD/LDAP federation is wired in a later phase)
+docker compose up --build
 ```
 
 Once up:
